@@ -380,7 +380,7 @@ int main(int argc, char* argv[]) {
             std::cout << "rover pos: " << rover_pos.x() << ", " << rover_pos.y() << ", " << rover_pos.z() << std::endl;
             std::cout << "rover velo: " << rover_vel.x() << ", " << rover_vel.y() << ", " << rover_vel.z() << std::endl;
             std::cout << "rover quaternion: " << rover_quat.e0() << ", " << rover_quat.e1() << ", " << rover_quat.e2() << ", " << rover_quat.e3() << std::endl;
-            std::cout << "motor torque: " << iris.GetDriveMotor(IrisWheelID::LF)->GetMotorTorque() << ", "  << iris.GetDriveMotor(IrisWheelID::RF)->GetMotorTorque() << ", " << iris.GetDriveMotor(IrisWheelID::LB)->GetMotorTorque() << ", " << iris.GetDriveMotor(IrisWheelID::RB)->GetMotorTorque() << ", "  << std::endl;
+            std::cout << "motor torque: " << iris.GetDriveMotor(IrisWheelID::LF)->GetMotorTorque() << ", "  << iris.GetDriveMotor(IrisWheelID::RF)->GetMotorTorque() << ", " << iris.GetDriveMotor(IrisWheelID::LB)->GetMotorTorque() << ", " << iris.GetDriveMotor(IrisWheelID::RB)->GetMotorTorque()  << std::endl;
 
             for (int i = 0; i < nW; i++) {
                 float3 F = trackers[i]->ContactAcc();
