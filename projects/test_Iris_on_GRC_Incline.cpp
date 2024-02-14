@@ -54,7 +54,6 @@ inline float3 ChVec2Float(const ChVector<>& vec) {
 inline ChVector<> Float2ChVec(float3 f3) {
     return ChVector<>(f3.x, f3.y, f3.z);
 }
-
 inline float4 ChQ2Float(const ChQuaternion<>& Q) {
     float4 f4;
     f4.w = Q.e0();
@@ -64,7 +63,26 @@ inline float4 ChQ2Float(const ChQuaternion<>& Q) {
     return f4;
 }
 
+// Load clump type, set clump material properties and load particle checkpoint file
+void PrepareParticles(DEMSolver& DEMSim, std::shared_ptr<DEMMaterial> wheel_material);
+
 void SaveParaViewFiles(Iris& rover, path& rover_dir, unsigned int frame_number);
+
+
+// E, nu, CoR, mu, COR for soil parameters
+float mu = 0.4;  // friction among soil particles
+float mu_wheel = 0.8;  // friction among wheel and terrain
+float mu_wall = 1.;
+float CoR = 0.25;
+float E = 1e8;
+
+
+// Define the simulation world domain (small size for debug)
+double world_x_size = 1.0;
+double world_y_size = 1.0;
+//    double world_x_size = 4.0f;
+//    double world_y_size = 2.0f;
+
 
 int main(int argc, char* argv[]) {
     SetChronoDataPath(CHRONO_DATA_DIR);
@@ -151,119 +169,9 @@ int main(int argc, char* argv[]) {
     DEMSim.DisableContactBetweenFamilies(1, 255);
 
     DEMSim.SetCollectAccRightAfterForceCalc(true);
-
-
-    // E, nu, CoR, mu, COR for soil parameters
-    float mu = 0.4;  // friction among soil particles
-    float mu_wheel = 0.8;  // friction among wheel and terrain
-    float mu_wall = 1.;
-    float CoR = 0.25;
-    float E = 1e8;
-    auto mat_type_wall = DEMSim.LoadMaterial({{"E", E}, {"nu", 0.3}, {"CoR", CoR}, {"mu", mu_wall}, {"Crr", 0.00}});
     auto mat_type_wheel = DEMSim.LoadMaterial({{"E", E}, {"nu", 0.3}, {"CoR", CoR}, {"mu", mu_wheel}, {"Crr", 0.00}});
-    auto mat_type_terrain = DEMSim.LoadMaterial({{"E", E}, {"nu", 0.3}, {"CoR", CoR}, {"mu", mu}, {"Crr", 0.00}});
-    DEMSim.SetMaterialPropertyPair("mu", mat_type_wheel, mat_type_terrain, mu_wheel);
-    DEMSim.SetMaterialPropertyPair("mu", mat_type_wall, mat_type_terrain, mu_wall);
 
-    // Define the simulation world domain (small size for debug)
-    double world_x_size = 1.0;
-    double world_y_size = 1.0;
-//    double world_x_size = 4.0f;
-//    double world_y_size = 2.0f;
-    DEMSim.InstructBoxDomainDimension(world_x_size, world_y_size, world_y_size);
-    float bottom = -0.5;
-    DEMSim.AddBCPlane(make_float3(0, 0, bottom), make_float3(0, 0, 1), mat_type_wall);
-    DEMSim.AddBCPlane(make_float3(0,  world_y_size / 2, 0), make_float3(0, -1, 0), mat_type_wall);
-    DEMSim.AddBCPlane(make_float3(0, -world_y_size / 2, 0), make_float3(0,  1, 0), mat_type_wall);
-    // X-dir bounding planes
-    DEMSim.AddBCPlane(make_float3(-world_x_size / 2., 0, 0), make_float3( 1, 0, 0), mat_type_wall);
-    DEMSim.AddBCPlane(make_float3( world_x_size / 2., 0, 0), make_float3(-1, 0, 0), mat_type_wall);
-
-    // Define the terrain particle templates
-    // Calculate its mass and MOI
-    float mass1 = 2.6e3 * 4.2520508;
-    float3 MOI1 = make_float3(1.6850426, 1.6375114, 2.1187753) * 2.6e3;
-    float mass2 = 2.6e3 * 2.1670011;
-    float3 MOI2 = make_float3(0.57402126, 0.60616378, 0.92890173) * 2.6e3;
-    // Scale the template we just created
-    std::vector<double> scales = {0.0014, 0.00075833, 0.00044, 0.0003, 0.0002, 0.00018333, 0.00017};
-    std::for_each(scales.begin(), scales.end(), [](double& r) { r *= 10.; });
-    // Then load it to system
-    std::shared_ptr<DEMClumpTemplate> my_template2 =
-        DEMSim.LoadClumpType(mass2, MOI2, GetDEMEDataFile("clumps/triangular_flat_6comp.csv"), mat_type_terrain);
-    std::shared_ptr<DEMClumpTemplate> my_template1 =
-        DEMSim.LoadClumpType(mass1, MOI1, GetDEMEDataFile("clumps/triangular_flat.csv"), mat_type_terrain);
-    std::vector<std::shared_ptr<DEMClumpTemplate>> ground_particle_templates = {my_template2,
-                                                                                DEMSim.Duplicate(my_template2),
-                                                                                my_template1,
-                                                                                DEMSim.Duplicate(my_template1),
-                                                                                DEMSim.Duplicate(my_template1),
-                                                                                DEMSim.Duplicate(my_template1),
-                                                                                DEMSim.Duplicate(my_template1)};
-    // Now scale those templates
-    for (int i = 0; i < scales.size(); i++) {
-        std::shared_ptr<DEMClumpTemplate>& my_template = ground_particle_templates.at(i);
-        // Note the mass and MOI are also scaled in the process, automatically. But if you are not happy with this, you
-        // can always manually change mass and MOI afterwards.
-        my_template->Scale(scales.at(i));
-        // Give these templates names, 0000, 0001 etc.
-        char t_name[20];
-        sprintf(t_name, "%04d", i);
-        my_template->AssignName(std::string(t_name));
-    }
-
-    // Now we load clump locations from a checkpointed file
-    {
-        std::cout << "Making terrain..." << std::endl;
-        std::unordered_map<std::string, std::vector<float3>> clump_xyz;
-        std::unordered_map<std::string, std::vector<float4>> clump_quaternion;
-        try {
-            clump_xyz = DEMSim.ReadClumpXyzFromCsv("./GRC_3e6.csv");
-            clump_quaternion = DEMSim.ReadClumpQuatFromCsv("./GRC_3e6.csv");
-        } catch (...) {
-            std::cout << "You will need to finish the GRCPrep demos first to obtain the checkpoint file GRC_3e6.csv, "
-                         "in order to run this demo. \nThat is a 4m by 2m GRC-1 terrain patch that is around 15cm "
-                         "thick.\nIf you don't have access to it, you can go to the forum "
-                         "(https://groups.google.com/g/projectchrono) to ask the authors for it."
-                      << std::endl;
-            return 1;
-        }
-        std::vector<float3> in_xyz;   // particle position
-        std::vector<float4> in_quat;  // particle quaternion 
-        std::vector<std::shared_ptr<DEMClumpTemplate>> in_types;  // particle clump type 
-        unsigned int t_num = 0;
-        for (int i = 0; i < scales.size(); i++) {
-            char t_name[20];
-            sprintf(t_name, "%04d", t_num);
-
-            auto this_type_xyz = clump_xyz[std::string(t_name)];
-            auto this_type_quat = clump_quaternion[std::string(t_name)];
-
-            size_t n_clump_this_type = this_type_xyz.size();
-            std::cout << "Loading clump " << std::string(t_name) << " which has particle num: " << n_clump_this_type
-                      << std::endl;
-            // Prepare clump type identification vector for loading into the system (don't forget type 0 in
-            // ground_particle_templates is the template for rover wheel)
-            std::vector<std::shared_ptr<DEMClumpTemplate>> this_type(n_clump_this_type,
-                                                                     ground_particle_templates.at(t_num));
-
-            // Add them to the big long vector
-            in_xyz.insert(in_xyz.end(), this_type_xyz.begin(), this_type_xyz.end());
-            in_quat.insert(in_quat.end(), this_type_quat.begin(), this_type_quat.end());
-            in_types.insert(in_types.end(), this_type.begin(), this_type.end());
-            std::cout << "Added clump type " << t_num << std::endl;
-            // Our template names are 0000, 0001 etc.
-            t_num++;
-        }
-
-        // Finally, load the info into this batch
-        DEMClumpBatch base_batch(in_xyz.size());
-        base_batch.SetTypes(in_types);
-        base_batch.SetPos(in_xyz);
-        base_batch.SetOriQ(in_quat);
-
-        DEMSim.AddClumps(base_batch);
-    }
+    PrepareParticles(DEMSim, mat_type_wheel);
 
     ///////////////////////
     // Add wheel in DEM
@@ -277,9 +185,7 @@ int main(int argc, char* argv[]) {
     // std::vector<std::shared_ptr<DEMClumpBatch>> DEM_Wheels;
     std::vector<std::shared_ptr<DEMMeshConnected>> DEM_Wheels;
     for (int i = 0; i < nW; i++) {
-        // DEM_Wheels.push_back(DEMSim.AddClumps(wheel_template, make_float3(wheel_pos[i].x(), wheel_pos[i].y(),
-        // wheel_pos[i].z())));
-        // DEM_Wheels[i]->InformCentroidPrincipal(make_float3(0), make_float4(0.7071, 0, 0, 0.7071));
+
         auto wheel_mesh = DEMSim.AddWavefrontMeshObject(wheel_obj_path, mat_type_wheel);
         DEM_Wheels.push_back(wheel_mesh);
 
@@ -328,17 +234,12 @@ int main(int argc, char* argv[]) {
     unsigned int fps = 20;
     // unsigned int move_box_ps = 1;
     unsigned int report_freq = 2000;
-    unsigned int param_update_freq = 10000;
     unsigned int out_steps = (unsigned int)(1.0 / (fps * step_size));
     float frame_accu_thres = 1.0 / fps;
     unsigned int report_steps = (unsigned int)(1.0 / (report_freq * step_size));
-    unsigned int param_update_steps = (unsigned int)(1.0 / (param_update_freq * step_size));
 
     // path out_dir = current_path();
     path out_dir = GetChronoOutputPath();
-    create_directory(out_dir);
-    // out_dir += "/DEME_FullDomain";
-    out_dir += "/DEME";
     create_directory(out_dir);
     out_dir += "/Iris_thicker_wheel" + std::to_string(Slope_deg);
     path rover_dir = out_dir / "./rover";
@@ -377,14 +278,12 @@ int main(int argc, char* argv[]) {
     SaveParaViewFiles(iris, rover_dir, 0);
 
     // Settle first, then put the wheel in place, then let the wheel sink in initially
-    for (float t = 0; t < 0.05; t += frame_accu_thres) {
+    for (float t = 0; t < 0.02; t += frame_accu_thres) {
         std::cout << "Num contacts: " << DEMSim.GetNumContacts() << std::endl;
         DEMSim.ShowThreadCollaborationStats();
         DEMSim.ShowTimingStats();
         DEMSim.DoDynamicsThenSync(frame_accu_thres);
     }
-
-    std::cout << "Num contacts: " << DEMSim.GetNumContacts() << std::endl;
 
     unsigned int chrono_update_freq = 10;
     // Active box domain
@@ -393,6 +292,8 @@ int main(int argc, char* argv[]) {
 
 
     for (float t = 0; t < time_end; t += step_size, curr_step++, frame_accu += step_size) {
+
+
         if (curr_step % chrono_update_freq == 0) {
             for (int i = 0; i < nW; i++) {
                 wheel_pos[i] = Wheels[i]->GetFrame_REF_to_abs().GetPos();
@@ -406,6 +307,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // at every frame step, write output and move active box domain
         if (frame_accu >= frame_accu_thres) {
             frame_accu = 0.;
             std::cout << "Frame: " << currframe << std::endl;
@@ -451,21 +353,13 @@ int main(int argc, char* argv[]) {
                 F *= wheel_mass;
                 float3 tor = trackers[i]->ContactAngAccLocal();
                 tor = wheel_MOI * tor;
+
                 wheel_pos[i] = Wheels[i]->GetFrame_REF_to_abs().GetPos();
                 Wheels[i]->Empty_forces_accumulators();
                 Wheels[i]->Accumulate_force(Float2ChVec(F), wheel_pos[i], false);
                 Wheels[i]->Accumulate_torque(Float2ChVec(tor), true);  // torque in DEME is local
                                                                        //
-                if (curr_step % report_steps == 0) {
-
-                std::cout << "print wheel force and torque: " << std::endl;
-                        ChVector<double> wheel_f = Float2ChVec(F);
-                        ChVector<double> wheel_t = Float2ChVec(tor);
-                std::cout << "wheel " << i << ", " << wheel_f.x() << ", " << wheel_f.y() << ", " << wheel_f.z() << ", " << wheel_t.x() << ", " << wheel_t.y() << ", " << wheel_t.z() << std::endl;
-
-
-                }
-                            }
+            }
             h_start = std::chrono::high_resolution_clock::now();
             sys.DoStepDynamics(step_size * chrono_update_freq);
             iris.Update();
@@ -474,27 +368,35 @@ int main(int argc, char* argv[]) {
         }
 
         if (curr_step % report_steps == 0) {
-            // float wheel_accu_vel = 0., wheel_accu_x = 0.;
-            // for (int i = 0; i < nW; i++) {
-            //     wheel_accu_vel += Wheels[i]->GetFrame_REF_to_abs().GetPos_dt().x();
-            //     wheel_accu_x += Wheels[i]->GetFrame_REF_to_abs().GetPos().x();
-            // }
-            float rover_vel = Body_1->GetFrame_REF_to_abs().GetPos_dt().x();
-            // float wheel_vel = wheel_accu_vel / nW;
-            float rover_pos = Body_1->GetFrame_REF_to_abs().GetPos().x();
-            // float wheel_pos = wheel_accu_x / nW;
-            float slip = 1.0 - rover_vel / (w_r * wheel_rad);
+
+
+            ChVector<float> rover_vel = Body_1->GetFrame_REF_to_abs().GetPos_dt();
+            ChVector<float> rover_pos = Body_1->GetFrame_REF_to_abs().GetPos();
+            ChQuaternion<float> rover_quat = Body_1->GetFrame_REF_to_abs().GetRot();
+
+
             max_v = max_v_finder->GetValue();
-            std::cout << "Current slope: " << Slope_deg << std::endl;
             std::cout << "Time: " << t << std::endl;
-            std::cout << "X: " << rover_pos << std::endl;
-            // std::cout << "Wheel X: " << wheel_pos << std::endl;
-            std::cout << "V: " << rover_vel << std::endl;
-            // std::cout << "Wheel V: " << wheel_vel << std::endl;
-            std::cout << "Slip: " << slip << std::endl;
-            std::cout << "Max vel in simulation is " << max_v << std::endl;
+            std::cout << "rover pos: " << rover_pos.x() << ", " << rover_pos.y() << ", " << rover_pos.z() << std::endl;
+            std::cout << "rover velo: " << rover_vel.x() << ", " << rover_vel.y() << ", " << rover_vel.z() << std::endl;
+            std::cout << "rover quaternion: " << rover_quat.e0() << ", " << rover_quat.e1() << ", " << rover_quat.e2() << ", " << rover_quat.e3() << std::endl;
+            std::cout << "motor torque: " << iris.GetDriveMotor(IrisWheelID::LF)->GetMotorTorque() << ", "  << iris.GetDriveMotor(IrisWheelID::RF)->GetMotorTorque() << ", " << iris.GetDriveMotor(IrisWheelID::LB)->GetMotorTorque() << ", " << iris.GetDriveMotor(IrisWheelID::RB)->GetMotorTorque() << ", "  << std::endl;
+
+            for (int i = 0; i < nW; i++) {
+                float3 F = trackers[i]->ContactAcc();
+                F *= wheel_mass;
+                float3 tor = trackers[i]->ContactAngAccLocal();
+                tor = wheel_MOI * tor;
+
+
+                std::cout << "wheel " << i << " f and trq from terrain: ";
+                std::cout << F.x << ", " << F.y << ", " << F.z << ", " << tor.x << ", " << tor.y << ", " << tor.z << std::endl;            
+            }
+
             std::cout << "========================" << std::endl;
-            if (rover_pos > 1.) {
+
+
+            if (rover_pos.x() > world_x_size / 2. - 0.2 ) {
                 std::cout << "This is far enough, stopping the simulation..." << std::endl;
                 std::cout << "========================" << std::endl;
                 DEMSim.DoDynamicsThenSync(0.);
@@ -513,6 +415,110 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
+
+
+
+void PrepareParticles(DEMSolver& DEMSim, std::shared_ptr<DEMMaterial> mat_type_wheel){
+
+
+    auto mat_type_wall = DEMSim.LoadMaterial({{"E", E}, {"nu", 0.3}, {"CoR", CoR}, {"mu", mu_wall}, {"Crr", 0.00}});
+    auto mat_type_terrain = DEMSim.LoadMaterial({{"E", E}, {"nu", 0.3}, {"CoR", CoR}, {"mu", mu}, {"Crr", 0.00}});
+    DEMSim.SetMaterialPropertyPair("mu", mat_type_wheel, mat_type_terrain, mu_wheel);
+    DEMSim.SetMaterialPropertyPair("mu", mat_type_wall, mat_type_terrain, mu_wall);
+
+    DEMSim.InstructBoxDomainDimension(world_x_size, world_y_size, world_y_size);
+    float bottom = -0.5;
+    DEMSim.AddBCPlane(make_float3(0, 0, bottom), make_float3(0, 0, 1), mat_type_wall);
+    DEMSim.AddBCPlane(make_float3(0,  world_y_size / 2, 0), make_float3(0, -1, 0), mat_type_wall);
+    DEMSim.AddBCPlane(make_float3(0, -world_y_size / 2, 0), make_float3(0,  1, 0), mat_type_wall);
+    // X-dir bounding planes
+    DEMSim.AddBCPlane(make_float3(-world_x_size / 2., 0, 0), make_float3( 1, 0, 0), mat_type_wall);
+    DEMSim.AddBCPlane(make_float3( world_x_size / 2., 0, 0), make_float3(-1, 0, 0), mat_type_wall);
+
+    // Define the terrain particle templates
+    // Calculate its mass and MOI
+    float mass1 = 2.6e3 * 4.2520508;
+    float3 MOI1 = make_float3(1.6850426, 1.6375114, 2.1187753) * 2.6e3;
+    float mass2 = 2.6e3 * 2.1670011;
+    float3 MOI2 = make_float3(0.57402126, 0.60616378, 0.92890173) * 2.6e3;
+    // Scale the template we just created
+    std::vector<double> scales = {0.0014, 0.00075833, 0.00044, 0.0003, 0.0002, 0.00018333, 0.00017};
+    std::for_each(scales.begin(), scales.end(), [](double& r) { r *= 10.; });
+    // Then load it to system
+    std::shared_ptr<DEMClumpTemplate> my_template2 =
+        DEMSim.LoadClumpType(mass2, MOI2, GetDEMEDataFile("clumps/triangular_flat_6comp.csv"), mat_type_terrain);
+    std::shared_ptr<DEMClumpTemplate> my_template1 =
+        DEMSim.LoadClumpType(mass1, MOI1, GetDEMEDataFile("clumps/triangular_flat.csv"), mat_type_terrain);
+    std::vector<std::shared_ptr<DEMClumpTemplate>> ground_particle_templates = {my_template2,
+                                                                                DEMSim.Duplicate(my_template2),
+                                                                                my_template1,
+                                                                                DEMSim.Duplicate(my_template1),
+                                                                                DEMSim.Duplicate(my_template1),
+                                                                                DEMSim.Duplicate(my_template1),
+                                                                                DEMSim.Duplicate(my_template1)};
+    // Now scale those templates
+    for (int i = 0; i < scales.size(); i++) {
+        std::shared_ptr<DEMClumpTemplate>& my_template = ground_particle_templates.at(i);
+        // Note the mass and MOI are also scaled in the process, automatically. But if you are not happy with this, you
+        // can always manually change mass and MOI afterwards.
+        my_template->Scale(scales.at(i));
+        // Give these templates names, 0000, 0001 etc.
+        char t_name[20];
+        sprintf(t_name, "%04d", i);
+        my_template->AssignName(std::string(t_name));
+    }
+
+    // Now we load clump locations from a checkpointed file
+        std::cout << "Making terrain..." << std::endl;
+        std::unordered_map<std::string, std::vector<float3>> clump_xyz;
+        std::unordered_map<std::string, std::vector<float4>> clump_quaternion;
+        try {
+            clump_xyz = DEMSim.ReadClumpXyzFromCsv("./GRC_3e6.csv");
+            clump_quaternion = DEMSim.ReadClumpQuatFromCsv("./GRC_3e6.csv");
+        } catch (...) {
+            throw std::runtime_error("You will need to finish the GRCPrep demos first to obtain the checkpoint file GRC_3e6.csv, "
+                             "in order to run this demo. That is a 4m by 2m GRC-1 terrain patch that is around 15cm "
+                             "thick. If you don't have access to it, you can go to the forum "
+                             "(https://groups.google.com/g/projectchrono) to ask the authors for it.");
+        }
+        std::vector<float3> in_xyz;   // particle position
+        std::vector<float4> in_quat;  // particle quaternion 
+        std::vector<std::shared_ptr<DEMClumpTemplate>> in_types;  // particle clump type 
+        unsigned int t_num = 0;
+        for (int i = 0; i < scales.size(); i++) {
+            char t_name[20];
+            sprintf(t_name, "%04d", t_num);
+
+            auto this_type_xyz = clump_xyz[std::string(t_name)];
+            auto this_type_quat = clump_quaternion[std::string(t_name)];
+
+            size_t n_clump_this_type = this_type_xyz.size();
+            std::cout << "Loading clump " << std::string(t_name) << " which has particle num: " << n_clump_this_type
+                      << std::endl;
+            // Prepare clump type identification vector for loading into the system (don't forget type 0 in
+            // ground_particle_templates is the template for rover wheel)
+            std::vector<std::shared_ptr<DEMClumpTemplate>> this_type(n_clump_this_type,
+                                                                     ground_particle_templates.at(t_num));
+
+            // Add them to the big long vector
+            in_xyz.insert(in_xyz.end(), this_type_xyz.begin(), this_type_xyz.end());
+            in_quat.insert(in_quat.end(), this_type_quat.begin(), this_type_quat.end());
+            in_types.insert(in_types.end(), this_type.begin(), this_type.end());
+            std::cout << "Added clump type " << t_num << std::endl;
+            // Our template names are 0000, 0001 etc.
+            t_num++;
+        }
+
+        // Finally, load the info into this batch
+        DEMClumpBatch base_batch(in_xyz.size());
+        base_batch.SetTypes(in_types);
+        base_batch.SetPos(in_xyz);
+        base_batch.SetOriQ(in_quat);
+
+        DEMSim.AddClumps(base_batch);
+}
+
 
 //------------------------------------------------------------------
 // Function to save the povray files of the MBD
